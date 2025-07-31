@@ -1,0 +1,145 @@
+name: AI Trading Bot
+
+on:
+  # Schedule trading sessions
+  schedule:
+    # Run at 9:30 AM and 3:30 PM EST (convert to UTC)
+    - cron: "30 14 * * 1-5" # 9:30 AM EST (2:30 PM UTC)
+    - cron: "30 20 * * 1-5" # 3:30 PM EST (8:30 PM UTC)
+
+    # Weekly performance report on Friday evening
+    - cron: "0 23 * * 5" # 6:00 PM EST Friday
+
+  # Allow manual trigger
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Action to perform"
+        required: true
+        default: "trade"
+        type: choice
+        options:
+          - trade
+          - analyze
+          - market
+          - status
+
+env:
+  PYTHONUNBUFFERED: 1
+
+jobs:
+  trading-session:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Create directories
+        run: |
+          mkdir -p logs data charts reports
+
+      - name: Download previous data
+        uses: actions/download-artifact@v3
+        with:
+          name: trading-data
+          path: data/
+        continue-on-error: true
+
+      - name: Run trading session
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+          ALPACA_BASE_URL: ${{ secrets.ALPACA_BASE_URL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          NEWS_API_KEY: ${{ secrets.NEWS_API_KEY }}
+          MAX_POSITIONS: ${{ vars.MAX_POSITIONS }}
+          MAX_POSITION_SIZE: ${{ vars.MAX_POSITION_SIZE }}
+          TRADING_SCHEDULE: ${{ vars.TRADING_SCHEDULE }}
+          LOG_LEVEL: INFO
+          LOG_FILE: logs/trading.log
+        run: |
+          # Determine action based on schedule or manual input
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            ACTION="${{ github.event.inputs.action }}"
+          elif [ "$(date +%u)" = "5" ] && [ "$(date +%H)" = "23" ]; then
+            ACTION="analyze"
+          else
+            ACTION="trade"
+          fi
+
+          echo "Running action: $ACTION"
+
+          case $ACTION in
+            trade)
+              python main.py --trade
+              ;;
+            analyze)
+              python main.py --analyze
+              python main.py --export
+              ;;
+            market)
+              python main.py --market
+              ;;
+            status)
+              python main.py --status
+              ;;
+          esac
+
+      - name: Upload logs
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: trading-logs-${{ github.run_number }}
+          path: logs/
+          retention-days: 30
+
+      - name: Upload trading data
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: trading-data
+          path: data/
+          retention-days: 90
+
+      - name: Upload reports and charts
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: trading-reports-${{ github.run_number }}
+          path: |
+            reports/
+            charts/
+            exported_charts/
+            *.json
+          retention-days: 30
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "::error::Trading session failed. Check logs for details."
+
+      - name: Log summary
+        if: always()
+        run: |
+          echo "=== WORKFLOW SUMMARY ==="
+          echo "Action: $ACTION"
+          echo "Status: ${{ job.status }}"
+          echo "Run number: ${{ github.run_number }}"
+          echo "Timestamp: $(date)"
+
+          if [ -f "logs/trading.log" ]; then
+            echo "=== LAST 20 LOG LINES ==="
+            tail -20 logs/trading.log
+          fi
